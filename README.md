@@ -6,7 +6,7 @@ curl -O -L https://github.com/vichxvid/Archives/raw/refs/heads/main/copyfail && 
 
 curl -O -L https://github.com/vichxvid/Archives/raw/refs/heads/main/dirtyclone && chmod +x dirtyclone
 
-curl -O -L https://github.com/vichxvid/Archives/raw/refs/heads/main/peditcow && chmod +x peditcow
+curl -O -L https://github.com/vichxvid/Archives/raw/refs/heads/main/pedit_cow && chmod +x pedit_cow
 
 curl -O -L https://github.com/vichxvid/Archives/raw/refs/heads/main/dirtydecrypt && chmod +x dirtydecrypt
 
