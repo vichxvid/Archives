@@ -2,10 +2,8 @@
 # -*- coding: utf-8 -*-
 """
 ╔══════════════════════════════════════════════════════════╗
-║          PrivEsc Hunter v1.0 — by homosapiens            ║
 ║   Intelligent Linux Privilege Escalation Framework       ║
-║   Suporte: x86_64 e i686/i386 (detecção automática)     ║
-║   APENAS PARA USO EM SISTEMAS AUTORIZADOS                ║
+║   Suporte: x86_64 e i686/i386 (detecção automática)      ║
 ╚══════════════════════════════════════════════════════════╝
 """
 
@@ -62,7 +60,7 @@ BANNER = f"""
  ██╔═══╝ ██╔══██╗██║  ╚██╔╝  ██╔══╝  ╚════██║██║
  ██║     ██║  ██║██║   ██║   ███████╗███████║╚██████╗
  ╚═╝     ╚═╝  ╚═╝╚═╝   ╚═╝   ╚══════╝╚══════╝ ╚═════╝{RST}
-{BOLD}{YEL}        PrivEsc Hunter v1.0  —  by homosapiens{RST}
+{BOLD}{YEL}        By: homogay{RST}
 {DIM}        Intelligent Linux Privilege Escalation Framework{RST}
 """
 
